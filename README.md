@@ -43,12 +43,30 @@ exclude = ["relay-manager"]
 
 [sets.gpu]
 include = ["gpu-*", "desktop-inspect*", "relay-manager"]
+
+[ci.profiles.gpu-linux]
+set = "gpu"
+platform = "linux"
+backend = "warpbuild"
+cache = "gpu-linux"
+
+[[ci.profiles.gpu-linux.tasks]]
+id = "build"
+stage = "build"
+run = "cargo build --verbose {{ package_args }}"
+
+[[ci.profiles.gpu-linux.tasks]]
+id = "nextest"
+stage = "test"
+run = "cargo nextest run --workspace -E '{{ nextest_expr }}' --no-fail-fast"
 ```
 
 Then scope a plan:
 
 ```bash
 cargo affect package-args --workspace crates --set gpu
+cargo affect plan --workspace crates --profile gpu-linux
+cargo affect ci-run --workspace crates --profile gpu-linux --stage test
 ```
 
 ## GitHub Action
@@ -65,11 +83,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: lightsofapollo/cargo-affect@v0.1.1
+      - uses: lightsofapollo/cargo-affect@v0.2.0
         id: affect
         with:
           workspace: crates
           base: origin/main
+          profile: gpu-linux
 
   test:
     needs: plan

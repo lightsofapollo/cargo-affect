@@ -11,25 +11,37 @@ use serde::{Deserialize, Serialize};
 
 fn main() -> Result<()> {
     let cli = Cli::parse_from(cargo_subcommand_args());
-    let plan = plan(cli.command.common_args())?;
 
     match cli.command {
-        Commands::Packages(_) => {
+        Commands::Packages(args) => {
+            let plan = plan(&args)?;
             for package in &plan.packages {
                 println!("{package}");
             }
         }
-        Commands::PackageArgs(_) => {
+        Commands::PackageArgs(args) => {
+            let plan = plan(&args)?;
             println!("{}", plan.package_args);
         }
-        Commands::NextestExpr(_) => {
+        Commands::NextestExpr(args) => {
+            let plan = plan(&args)?;
             println!("{}", plan.nextest_expr);
         }
-        Commands::Explain(_) => {
+        Commands::Explain(args) => {
+            let plan = plan(&args)?;
             print_explanation(&plan);
         }
-        Commands::Plan(_) => {
+        Commands::Plan(args) => {
+            let plan = plan(&args)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Commands::CiTasks(args) => {
+            let plan = plan(&args.common)?;
+            print_ci_tasks(&plan, args.stage.as_deref())?;
+        }
+        Commands::CiRun(args) => {
+            let plan = plan(&args.common)?;
+            run_ci_tasks(&plan, args.stage.as_deref(), args.dry_run)?;
         }
     }
 
@@ -56,18 +68,12 @@ enum Commands {
     Explain(CommonArgs),
     /// Print the full JSON plan.
     Plan(CommonArgs),
-}
-
-impl Commands {
-    fn common_args(&self) -> &CommonArgs {
-        match self {
-            Commands::Packages(args)
-            | Commands::PackageArgs(args)
-            | Commands::NextestExpr(args)
-            | Commands::Explain(args)
-            | Commands::Plan(args) => args,
-        }
-    }
+    /// Print selected CI task ids from an optional profile.
+    #[command(name = "ci-tasks")]
+    CiTasks(CiTaskArgs),
+    /// Run selected CI task commands from an optional profile.
+    #[command(name = "ci-run")]
+    CiRun(CiRunArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -95,6 +101,34 @@ struct CommonArgs {
     /// Platform policy to apply. Defaults to the current OS name.
     #[arg(long)]
     platform: Option<String>,
+
+    /// Optional CI profile from affect.toml. Profiles can supply set/platform/backend/task rules.
+    #[arg(long)]
+    profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct CiTaskArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Optional task stage filter, for example setup, build, or test.
+    #[arg(long)]
+    stage: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct CiRunArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Optional task stage filter, for example setup, build, or test.
+    #[arg(long)]
+    stage: Option<String>,
+
+    /// Print selected task commands without executing them.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,6 +141,8 @@ struct Plan {
     nextest_expr: String,
     select_all: bool,
     cache_dimensions: CacheDimensions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ci: Option<CiPlan>,
     reasons: BTreeMap<String, Vec<String>>,
 }
 
@@ -114,6 +150,25 @@ struct Plan {
 struct CacheDimensions {
     workspace: String,
     package_group: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CiPlan {
+    profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache: Option<String>,
+    tasks: Vec<PlannedTask>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PlannedTask {
+    id: String,
+    stage: String,
+    run: String,
+    working_directory: String,
+    reasons: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -133,6 +188,8 @@ struct PolicyConfig {
     platform: BTreeMap<String, PlatformPolicy>,
     #[serde(default)]
     sets: BTreeMap<String, PackageSetPolicy>,
+    #[serde(default)]
+    ci: CiConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -145,6 +202,43 @@ struct PlatformPolicy {
 struct PackageSetPolicy {
     #[serde(default)]
     include: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CiConfig {
+    #[serde(default)]
+    profiles: BTreeMap<String, CiProfilePolicy>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CiProfilePolicy {
+    set: Option<String>,
+    #[serde(default)]
+    sets: Vec<String>,
+    platform: Option<String>,
+    backend: Option<String>,
+    cache: Option<String>,
+    #[serde(default)]
+    tasks: Vec<CiTaskPolicy>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CiTaskPolicy {
+    id: String,
+    #[serde(default)]
+    stage: String,
+    run: String,
+    working_directory: Option<String>,
+    #[serde(default)]
+    when: CiTaskWhenPolicy,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CiTaskWhenPolicy {
+    #[serde(default)]
+    packages: Vec<String>,
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 fn cargo_subcommand_args() -> Vec<String> {
@@ -164,9 +258,16 @@ fn plan(args: &CommonArgs) -> Result<Plan> {
 
     let workspace_root = canonicalize_dir(&metadata.workspace_root)?;
     let config = load_policy_config(args, &workspace_root)?;
+    let profile = resolve_ci_profile(&config, args.profile.as_deref())?;
+    let package_sets = effective_package_sets(args, profile);
+    let platform = effective_platform(args, profile);
     let packages = workspace_packages(&metadata)?;
     let reverse_deps = reverse_workspace_dependencies(&metadata, &packages);
     let changed_files = changed_files(args, &workspace_root)?;
+    let changed_relative_files = changed_files
+        .iter()
+        .map(|file| relative_path(file, &workspace_root))
+        .collect::<Vec<_>>();
 
     let mut selected = BTreeSet::<String>::new();
     let mut reasons = BTreeMap::<String, Vec<String>>::new();
@@ -246,12 +347,8 @@ fn plan(args: &CommonArgs) -> Result<Plan> {
         }
     }
 
-    selected = apply_package_set_filters(selected, &config, &args.package_sets)?;
-    selected = apply_platform_excludes(
-        selected,
-        &config,
-        args.platform.as_deref().unwrap_or(env::consts::OS),
-    )?;
+    selected = apply_package_set_filters(selected, &config, &package_sets)?;
+    selected = apply_platform_excludes(selected, &config, &platform)?;
 
     reasons.retain(|package, _| selected.contains(package));
 
@@ -267,14 +364,19 @@ fn plan(args: &CommonArgs) -> Result<Plan> {
         .map(|package| format!("package({package})"))
         .collect::<Vec<_>>()
         .join(" | ");
+    let ci = plan_ci(
+        args.profile.as_deref(),
+        profile,
+        &selected_packages,
+        &changed_relative_files,
+        &package_args,
+        &nextest_expr,
+    )?;
 
     Ok(Plan {
         workspace_root: workspace_root.to_string(),
         base: args.base.clone(),
-        changed_files: changed_files
-            .iter()
-            .map(|file| relative_path(file, &workspace_root))
-            .collect(),
+        changed_files: changed_relative_files,
         packages: selected_packages,
         package_args,
         nextest_expr,
@@ -283,8 +385,175 @@ fn plan(args: &CommonArgs) -> Result<Plan> {
             workspace: workspace_root.to_string(),
             package_group,
         },
+        ci,
         reasons,
     })
+}
+
+fn resolve_ci_profile<'a>(
+    config: &'a PolicyConfig,
+    profile_name: Option<&str>,
+) -> Result<Option<&'a CiProfilePolicy>> {
+    let Some(profile_name) = profile_name else {
+        return Ok(None);
+    };
+
+    config
+        .ci
+        .profiles
+        .get(profile_name)
+        .map(Some)
+        .ok_or_else(|| anyhow!("unknown CI profile {profile_name} in affect.toml"))
+}
+
+fn effective_package_sets(args: &CommonArgs, profile: Option<&CiProfilePolicy>) -> Vec<String> {
+    let mut sets = Vec::new();
+    if let Some(profile) = profile {
+        if let Some(set) = &profile.set {
+            sets.push(set.clone());
+        }
+        sets.extend(profile.sets.iter().cloned());
+    }
+    sets.extend(args.package_sets.iter().cloned());
+    sets
+}
+
+fn effective_platform(args: &CommonArgs, profile: Option<&CiProfilePolicy>) -> String {
+    args.platform
+        .clone()
+        .or_else(|| profile.and_then(|profile| profile.platform.clone()))
+        .unwrap_or_else(|| env::consts::OS.to_string())
+}
+
+fn plan_ci(
+    profile_name: Option<&str>,
+    profile: Option<&CiProfilePolicy>,
+    selected_packages: &[String],
+    changed_relative_files: &[String],
+    package_args: &str,
+    nextest_expr: &str,
+) -> Result<Option<CiPlan>> {
+    let Some(profile_name) = profile_name else {
+        return Ok(None);
+    };
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+
+    let tasks = planned_tasks(
+        profile,
+        selected_packages,
+        changed_relative_files,
+        package_args,
+        nextest_expr,
+    )?;
+
+    Ok(Some(CiPlan {
+        profile: profile_name.to_string(),
+        backend: profile.backend.clone(),
+        cache: profile.cache.clone(),
+        tasks,
+    }))
+}
+
+fn planned_tasks(
+    profile: &CiProfilePolicy,
+    selected_packages: &[String],
+    changed_relative_files: &[String],
+    package_args: &str,
+    nextest_expr: &str,
+) -> Result<Vec<PlannedTask>> {
+    if selected_packages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    profile
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task_match_reasons(task, selected_packages, changed_relative_files)
+                .map(|reasons| reasons.map(|reasons| (task, reasons)))
+                .transpose()
+        })
+        .map(|matched| {
+            let (task, reasons) = matched?;
+            if task.id.trim().is_empty() {
+                bail!("CI task in affect.toml is missing an id");
+            }
+            if task.run.trim().is_empty() {
+                bail!("CI task {} is missing a run command", task.id);
+            }
+
+            Ok(PlannedTask {
+                id: task.id.clone(),
+                stage: task_stage(task),
+                run: render_task_run(task, selected_packages, package_args, nextest_expr),
+                working_directory: task
+                    .working_directory
+                    .clone()
+                    .unwrap_or_else(|| ".".to_string()),
+                reasons,
+            })
+        })
+        .collect()
+}
+
+fn task_match_reasons(
+    task: &CiTaskPolicy,
+    selected_packages: &[String],
+    changed_relative_files: &[String],
+) -> Result<Option<Vec<String>>> {
+    let has_package_conditions = !task.when.packages.is_empty();
+    let has_path_conditions = !task.when.paths.is_empty();
+
+    if !has_package_conditions && !has_path_conditions {
+        return Ok(Some(vec!["always".to_string()]));
+    }
+
+    let mut reasons = Vec::new();
+    for pattern in &task.when.packages {
+        for package in selected_packages {
+            if glob_matches(pattern, package)? {
+                reasons.push(format!("package {package} matches {pattern}"));
+                break;
+            }
+        }
+    }
+
+    for pattern in &task.when.paths {
+        for path in changed_relative_files {
+            if glob_matches(pattern, path)? {
+                reasons.push(format!("path {path} matches {pattern}"));
+                break;
+            }
+        }
+    }
+
+    if reasons.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(reasons))
+    }
+}
+
+fn task_stage(task: &CiTaskPolicy) -> String {
+    if task.stage.trim().is_empty() {
+        "default".to_string()
+    } else {
+        task.stage.clone()
+    }
+}
+
+fn render_task_run(
+    task: &CiTaskPolicy,
+    selected_packages: &[String],
+    package_args: &str,
+    nextest_expr: &str,
+) -> String {
+    task.run
+        .replace("{{ package_args }}", package_args)
+        .replace("{{ nextest_expr }}", nextest_expr)
+        .replace("{{ packages }}", &selected_packages.join(" "))
 }
 
 fn workspace_manifest_path(workspace: &Utf8Path) -> Result<Utf8PathBuf> {
@@ -617,6 +886,83 @@ fn print_explanation(plan: &Plan) {
     }
 }
 
+fn print_ci_tasks(plan: &Plan, stage: Option<&str>) -> Result<()> {
+    for task in selected_ci_tasks(plan, stage)? {
+        println!("{}", task.id);
+    }
+    Ok(())
+}
+
+fn run_ci_tasks(plan: &Plan, stage: Option<&str>, dry_run: bool) -> Result<()> {
+    let workspace_root = Utf8Path::new(&plan.workspace_root);
+    let tasks = selected_ci_tasks(plan, stage)?;
+    if tasks.is_empty() {
+        println!("No CI tasks selected.");
+        return Ok(());
+    }
+
+    for task in tasks {
+        let working_directory = task_working_directory(workspace_root, task)?;
+        if dry_run {
+            println!(
+                "{} [{}] ({})\n{}",
+                task.id, task.stage, working_directory, task.run
+            );
+            continue;
+        }
+
+        println!("Running CI task {} [{}]", task.id, task.stage);
+        let status = ProcessCommand::new(env::var("CARGO_AFFECT_SHELL").unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "cmd".to_string()
+            } else {
+                "bash".to_string()
+            }
+        }));
+        let mut command = status;
+        if cfg!(windows) {
+            command.args(["/C", &task.run]);
+        } else {
+            command.args(["-lc", &task.run]);
+        }
+        let status = command
+            .current_dir(&working_directory)
+            .status()
+            .with_context(|| format!("failed to run CI task {}", task.id))?;
+
+        if !status.success() {
+            bail!("CI task {} failed with {status}", task.id);
+        }
+    }
+
+    Ok(())
+}
+
+fn selected_ci_tasks<'a>(plan: &'a Plan, stage: Option<&str>) -> Result<Vec<&'a PlannedTask>> {
+    let Some(ci) = &plan.ci else {
+        if stage.is_some() {
+            bail!("--stage requires --profile with [ci.profiles] config");
+        }
+        return Ok(Vec::new());
+    };
+
+    Ok(ci
+        .tasks
+        .iter()
+        .filter(|task| stage.is_none_or(|stage| task.stage == stage))
+        .collect())
+}
+
+fn task_working_directory(workspace_root: &Utf8Path, task: &PlannedTask) -> Result<Utf8PathBuf> {
+    let path = Utf8Path::new(&task.working_directory);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    };
+    Ok(normalize_path(path))
+}
+
 trait Pipe: Sized {
     fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
         f(self)
@@ -770,6 +1116,81 @@ include = ["a"]
     }
 
     #[test]
+    fn ci_profile_supplies_set_platform_and_tasks() {
+        let workspace = TestWorkspace::new();
+        workspace.write_config(
+            r#"
+[platform.linux]
+exclude = ["b"]
+
+[sets.core]
+include = ["a", "b"]
+
+[ci.profiles.core-linux]
+set = "core"
+platform = "linux"
+backend = "warpbuild"
+cache = "core-linux"
+
+[[ci.profiles.core-linux.tasks]]
+id = "build"
+stage = "build"
+run = "cargo build {{ package_args }}"
+
+[[ci.profiles.core-linux.tasks]]
+id = "nextest"
+stage = "test"
+run = "cargo nextest run -E '{{ nextest_expr }}'"
+when.packages = ["a"]
+
+[[ci.profiles.core-linux.tasks]]
+id = "docs"
+stage = "test"
+run = "cargo test -p c"
+when.paths = ["docs/**"]
+"#,
+        );
+        let mut args = args(&workspace, ["a/src/lib.rs"]);
+        args.profile = Some("core-linux".to_string());
+
+        let plan = plan(&args).unwrap();
+
+        assert_eq!(plan.packages, vec!["a"]);
+        let ci = plan.ci.unwrap();
+        assert_eq!(ci.profile, "core-linux");
+        assert_eq!(ci.backend.as_deref(), Some("warpbuild"));
+        assert_eq!(ci.cache.as_deref(), Some("core-linux"));
+        assert_eq!(
+            ci.tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["build", "nextest"]
+        );
+        assert_eq!(ci.tasks[0].run, "cargo build -p a");
+        assert_eq!(ci.tasks[1].run, "cargo nextest run -E 'package(a)'");
+    }
+
+    #[test]
+    fn ci_tasks_are_optional_without_profile() {
+        let workspace = TestWorkspace::new();
+        workspace.write_config(
+            r#"
+[sets.core]
+include = ["a"]
+
+[ci.profiles.core]
+set = "core"
+"#,
+        );
+
+        let plan = plan(&args(&workspace, ["a/src/lib.rs"])).unwrap();
+
+        assert_eq!(plan.packages, vec!["a", "b"]);
+        assert!(plan.ci.is_none());
+    }
+
+    #[test]
     fn repo_relative_paths_work_for_nested_workspace() {
         let repo = tempfile::tempdir().unwrap();
         let repo_root = Utf8PathBuf::from_path_buf(repo.path().to_path_buf()).unwrap();
@@ -783,6 +1204,7 @@ include = ["a"]
             config: None,
             package_sets: Vec::new(),
             platform: None,
+            profile: None,
         })
         .unwrap();
 
@@ -865,6 +1287,7 @@ resolver = "2"
             config: None,
             package_sets: Vec::new(),
             platform: None,
+            profile: None,
         }
     }
 

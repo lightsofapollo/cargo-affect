@@ -17,9 +17,18 @@ inputs:
   platform:
     description: Optional platform policy name. Defaults to cargo-affect's host OS.
     default: ""
+  profile:
+    description: Optional CI profile from affect.toml.
+    default: ""
   backend:
     description: CI/cache backend recipe name, for downstream matrix/cache consumers.
     default: "auto"
+  stage:
+    description: Optional CI task stage to run when run-tasks is true.
+    default: ""
+  run-tasks:
+    description: Run selected CI profile tasks after planning.
+    default: "false"
   version:
     description: cargo-affect release tag to install. Defaults to the action ref when it is a tag; otherwise builds from source.
     default: ""
@@ -37,6 +46,15 @@ outputs:
   json:
     description: Full cargo-affect JSON plan.
     value: ${{ steps.plan.outputs.json }}
+  profile:
+    description: CI profile used for the plan, when configured.
+    value: ${{ steps.plan.outputs.profile }}
+  tasks:
+    description: Full selected CI task JSON array.
+    value: ${{ steps.plan.outputs.tasks }}
+  task-ids:
+    description: Space-separated selected CI task ids.
+    value: ${{ steps.plan.outputs.task-ids }}
   empty:
     description: "true when no packages were selected."
     value: ${{ steps.plan.outputs.empty }}
@@ -70,7 +88,10 @@ runs:
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_SET: ${{ inputs.set }}
         INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_PROFILE: ${{ inputs.profile }}
         INPUT_BACKEND: ${{ inputs.backend }}
+        INPUT_STAGE: ${{ inputs.stage }}
+        INPUT_RUN_TASKS: ${{ inputs.run-tasks }}
       run: |
         set -euo pipefail
 
@@ -82,6 +103,10 @@ runs:
 
         if [ -n "$INPUT_PLATFORM" ]; then
           args+=(--platform "$INPUT_PLATFORM")
+        fi
+
+        if [ -n "$INPUT_PROFILE" ]; then
+          args+=(--profile "$INPUT_PROFILE")
         fi
 
         if [ -n "$INPUT_SET" ]; then
@@ -105,20 +130,68 @@ runs:
         with open(plan_path, "r", encoding="utf-8") as handle:
             plan = json.load(handle)
 
+        ci = plan.get("ci") or {}
+        tasks = ci.get("tasks") or []
+        task_ids = " ".join(task["id"] for task in tasks)
+        backend_value = backend
+        if backend_value == "auto":
+            backend_value = ci.get("backend") or "auto"
+
+        package_group = plan["cache_dimensions"]["package_group"]
+        cache_group = package_group
+        if ci.get("cache"):
+            cache_group = f"{ci['cache']}-{package_group}" if package_group else ci["cache"]
+
         outputs = {
             "packages": " ".join(plan["packages"]),
             "package-args": plan["package_args"],
             "nextest-expr": plan["nextest_expr"],
             "empty": "true" if not plan["packages"] else "false",
-            "cache-group": plan["cache_dimensions"]["package_group"],
-            "backend": backend,
+            "cache-group": cache_group,
+            "backend": backend_value,
+            "profile": ci.get("profile", ""),
+            "task-ids": task_ids,
             "runner": f"{os.environ.get('RUNNER_OS', '')}-{os.environ.get('RUNNER_ARCH', '')}".strip("-"),
         }
 
         with open(output_path, "a", encoding="utf-8") as output:
             for key, value in outputs.items():
                 print(f"{key}={value}", file=output)
+            print("tasks<<__CARGO_AFFECT_TASKS_JSON__", file=output)
+            print(json.dumps(tasks, indent=2), file=output)
+            print("__CARGO_AFFECT_TASKS_JSON__", file=output)
             print("json<<__CARGO_AFFECT_JSON__", file=output)
             print(json.dumps(plan, indent=2), file=output)
             print("__CARGO_AFFECT_JSON__", file=output)
         PY
+
+        if [ "$INPUT_RUN_TASKS" = "true" ]; then
+          run_args=(ci-run --workspace "$INPUT_WORKSPACE" --base "$INPUT_BASE")
+
+          if [ -n "$INPUT_CONFIG" ]; then
+            run_args+=(--config "$INPUT_CONFIG")
+          fi
+
+          if [ -n "$INPUT_PLATFORM" ]; then
+            run_args+=(--platform "$INPUT_PLATFORM")
+          fi
+
+          if [ -n "$INPUT_PROFILE" ]; then
+            run_args+=(--profile "$INPUT_PROFILE")
+          fi
+
+          if [ -n "$INPUT_STAGE" ]; then
+            run_args+=(--stage "$INPUT_STAGE")
+          fi
+
+          if [ -n "$INPUT_SET" ]; then
+            IFS=',' read -ra sets <<< "$INPUT_SET"
+            for set_name in "${sets[@]}"; do
+              if [ -n "$set_name" ]; then
+                run_args+=(--set "$set_name")
+              fi
+            done
+          fi
+
+          cargo-affect "${run_args[@]}"
+        fi
