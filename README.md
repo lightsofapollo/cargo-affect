@@ -78,12 +78,12 @@ jobs:
     outputs:
       nextest-expr: ${{ steps.affect.outputs.nextest-expr }}
       empty: ${{ steps.affect.outputs.empty }}
-      cache-group: ${{ steps.affect.outputs.cache-group }}
+      cache-key: ${{ steps.affect.outputs.cache-key }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: lightsofapollo/cargo-affect@v0.2.1
+      - uses: lightsofapollo/cargo-affect@v0.2.2
         id: affect
         with:
           workspace: crates
@@ -111,7 +111,7 @@ WarpBuild is just one backend recipe. The important part is that the cache key u
 - uses: WarpBuilds/rust-cache@v2
   with:
     workspaces: crates/ -> target
-    shared-key: rust-${{ runner.os }}-${{ steps.affect.outputs.cache-group }}
+    shared-key: rust-${{ runner.os }}-${{ steps.affect.outputs.cache-key }}
 ```
 
 ### Other Backends

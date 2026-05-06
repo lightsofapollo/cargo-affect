@@ -64,6 +64,9 @@ outputs:
   cache-group:
     description: Stable package group string for cache key dimensions.
     value: ${{ steps.plan.outputs.cache-group }}
+  cache-key:
+    description: Short stable hash of the cache group, safe for provider cache key limits.
+    value: ${{ steps.plan.outputs.cache-key }}
   backend:
     description: Backend recipe requested by the workflow.
     value: ${{ steps.plan.outputs.backend }}
@@ -156,6 +159,7 @@ runs:
         cargo-affect "${args[@]}" > "$plan_file"
 
         python3 - "$plan_file" "$GITHUB_OUTPUT" "$INPUT_BACKEND" <<'PY'
+        import hashlib
         import json
         import os
         import sys
@@ -183,6 +187,7 @@ runs:
             "empty": "true" if not plan["packages"] else "false",
             "base": plan["base"],
             "cache-group": cache_group,
+            "cache-key": hashlib.sha256(cache_group.encode("utf-8")).hexdigest()[:16],
             "backend": backend_value,
             "profile": ci.get("profile", ""),
             "task-ids": task_ids,
