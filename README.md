@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - uses: lightsofapollo/cargo-affect@v0.2.4
+      - uses: lightsofapollo/cargo-affect@v0.2.5
         id: affect
         with:
           workspace: crates
@@ -126,7 +126,7 @@ The core planner output is the same for all of them.
 
 CI should not rebuild `cargo-affect` just to decide what changed. The GitHub Action prefers a prebuilt release binary, then a restored tool cache, and only falls back to a local release build for unreleased SHAs or local development.
 
-The action can work with shallow checkouts. By default it fetches only the resolved diff base, using `base-fetch-depth` as the bounded history depth for branch and push comparisons. Set `fetch-base: false` if your workflow already checks out the needed history.
+The action can work with shallow checkouts. By default it fetches only the resolved diff base at depth 1. For push events, if a base SHA cannot be fetched directly, `current-branch-deepen-depth` controls the bounded fallback history depth. Set `fetch-base: false` if your workflow already checks out the needed history.
 
 The optimized test path is `cargo nextest run -E '<expr>'`. `package-args` exists for plain Cargo commands, but large workspaces should usually consume `nextest-expr`.
 

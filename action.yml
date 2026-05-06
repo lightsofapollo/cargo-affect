@@ -12,7 +12,10 @@ inputs:
     description: Fetch the resolved diff base when it is missing from a shallow checkout.
     default: "true"
   base-fetch-depth:
-    description: Commit depth used when fetching the diff base or deepening the current branch.
+    description: Commit depth used when fetching the resolved diff base.
+    default: "1"
+  current-branch-deepen-depth:
+    description: Extra history to fetch from the current branch when a push-event base SHA cannot be fetched directly.
     default: "256"
   config:
     description: Optional affect.toml path.
@@ -99,6 +102,7 @@ runs:
         INPUT_BASE: ${{ inputs.base }}
         INPUT_FETCH_BASE: ${{ inputs.fetch-base }}
         INPUT_BASE_FETCH_DEPTH: ${{ inputs.base-fetch-depth }}
+        INPUT_CURRENT_BRANCH_DEEPEN_DEPTH: ${{ inputs.current-branch-deepen-depth }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_SET: ${{ inputs.set }}
         INPUT_PLATFORM: ${{ inputs.platform }}
@@ -189,7 +193,7 @@ runs:
                 if ! ref_exists "$base"; then
                   current_branch="${GITHUB_REF_NAME:-}"
                   if [ -n "$current_branch" ] && [ "${GITHUB_REF_TYPE:-}" = "branch" ]; then
-                    git fetch --no-tags --deepen="$INPUT_BASE_FETCH_DEPTH" origin \
+                    git fetch --no-tags --deepen="$INPUT_CURRENT_BRANCH_DEEPEN_DEPTH" origin \
                       "+refs/heads/${current_branch}:refs/remotes/origin/${current_branch}" || true
                   fi
                 fi
