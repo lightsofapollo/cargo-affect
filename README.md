@@ -133,6 +133,5 @@ The optimized test path is `cargo nextest run -E '<expr>'`. `package-args` exist
 For local installation:
 
 ```bash
-cargo install cargo-affect
 cargo install --git https://github.com/lightsofapollo/cargo-affect
 ```
