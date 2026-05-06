@@ -6,8 +6,8 @@ inputs:
     description: Cargo workspace root or manifest path.
     default: "."
   base:
-    description: Git base ref to diff against.
-    default: "origin/main"
+    description: Git base ref to diff against, or auto for pull_request/push detection.
+    default: "auto"
   config:
     description: Optional affect.toml path.
     default: ""
@@ -46,6 +46,9 @@ outputs:
   json:
     description: Full cargo-affect JSON plan.
     value: ${{ steps.plan.outputs.json }}
+  base:
+    description: Git base ref used for the plan.
+    value: ${{ steps.plan.outputs.base }}
   profile:
     description: CI profile used for the plan, when configured.
     value: ${{ steps.plan.outputs.profile }}
@@ -95,7 +98,38 @@ runs:
       run: |
         set -euo pipefail
 
-        args=(plan --workspace "$INPUT_WORKSPACE" --base "$INPUT_BASE")
+        base="$INPUT_BASE"
+        if [ "$base" = "auto" ]; then
+          base="$(python3 - <<'PY'
+        import json
+        import os
+
+        event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+        event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+        event = {}
+        if event_path:
+            try:
+                with open(event_path, "r", encoding="utf-8") as handle:
+                    event = json.load(handle)
+            except FileNotFoundError:
+                pass
+
+        if event_name == "pull_request" and os.environ.get("GITHUB_BASE_REF"):
+            print(f"origin/{os.environ['GITHUB_BASE_REF']}")
+        elif event_name == "push":
+            before = event.get("before", "")
+            if before and before.strip("0"):
+                print(before)
+            else:
+                print("origin/main")
+        else:
+            print("origin/main")
+        PY
+          )"
+        fi
+
+        echo "Using diff base $base"
+        args=(plan --workspace "$INPUT_WORKSPACE" --base "$base")
 
         if [ -n "$INPUT_CONFIG" ]; then
           args+=(--config "$INPUT_CONFIG")
@@ -147,6 +181,7 @@ runs:
             "package-args": plan["package_args"],
             "nextest-expr": plan["nextest_expr"],
             "empty": "true" if not plan["packages"] else "false",
+            "base": plan["base"],
             "cache-group": cache_group,
             "backend": backend_value,
             "profile": ci.get("profile", ""),
@@ -166,7 +201,7 @@ runs:
         PY
 
         if [ "$INPUT_RUN_TASKS" = "true" ]; then
-          run_args=(ci-run --workspace "$INPUT_WORKSPACE" --base "$INPUT_BASE")
+          run_args=(ci-run --workspace "$INPUT_WORKSPACE" --base "$base")
 
           if [ -n "$INPUT_CONFIG" ]; then
             run_args+=(--config "$INPUT_CONFIG")
