@@ -1,0 +1,21 @@
+[package]
+name = "cargo-affect"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Plan affected Rust workspace package checks from git changes."
+repository = "https://github.com/lightsofapollo/cargo-affect"
+
+[dependencies]
+anyhow = "1.0.102"
+camino = "1.2.2"
+cargo_metadata = "0.23.1"
+clap = { version = "4.6.1", features = ["derive"] }
+globset = "0.4.18"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml = "1.1.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"

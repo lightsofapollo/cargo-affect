@@ -1,0 +1,124 @@
+name: cargo-affect
+description: Plan affected Rust workspace package checks from git changes.
+
+inputs:
+  workspace:
+    description: Cargo workspace root or manifest path.
+    default: "."
+  base:
+    description: Git base ref to diff against.
+    default: "origin/main"
+  config:
+    description: Optional affect.toml path.
+    default: ""
+  set:
+    description: Optional comma-separated package set names from affect.toml.
+    default: ""
+  platform:
+    description: Optional platform policy name. Defaults to cargo-affect's host OS.
+    default: ""
+  backend:
+    description: CI/cache backend recipe name, for downstream matrix/cache consumers.
+    default: "auto"
+  version:
+    description: cargo-affect release tag to install. Defaults to the action ref when it is a tag; otherwise builds from source.
+    default: ""
+
+outputs:
+  packages:
+    description: Space-separated affected package names.
+    value: ${{ steps.plan.outputs.packages }}
+  package-args:
+    description: Cargo package arguments, for example `-p crate-a -p crate-b`.
+    value: ${{ steps.plan.outputs.package-args }}
+  nextest-expr:
+    description: cargo-nextest package filter expression.
+    value: ${{ steps.plan.outputs.nextest-expr }}
+  json:
+    description: Full cargo-affect JSON plan.
+    value: ${{ steps.plan.outputs.json }}
+  empty:
+    description: "true when no packages were selected."
+    value: ${{ steps.plan.outputs.empty }}
+  cache-group:
+    description: Stable package group string for cache key dimensions.
+    value: ${{ steps.plan.outputs.cache-group }}
+  backend:
+    description: Backend recipe requested by the workflow.
+    value: ${{ steps.plan.outputs.backend }}
+  runner:
+    description: Current runner OS/architecture label.
+    value: ${{ steps.plan.outputs.runner }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install cargo-affect
+      shell: bash
+      env:
+        CARGO_AFFECT_VERSION: ${{ inputs.version }}
+        CARGO_AFFECT_ACTION_REF: ${{ github.action_ref }}
+        CARGO_AFFECT_ACTION_PATH: ${{ github.action_path }}
+      run: "$GITHUB_ACTION_PATH/scripts/install.sh"
+
+    - name: Plan affected packages
+      id: plan
+      shell: bash
+      env:
+        INPUT_WORKSPACE: ${{ inputs.workspace }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_SET: ${{ inputs.set }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_BACKEND: ${{ inputs.backend }}
+      run: |
+        set -euo pipefail
+
+        args=(plan --workspace "$INPUT_WORKSPACE" --base "$INPUT_BASE")
+
+        if [ -n "$INPUT_CONFIG" ]; then
+          args+=(--config "$INPUT_CONFIG")
+        fi
+
+        if [ -n "$INPUT_PLATFORM" ]; then
+          args+=(--platform "$INPUT_PLATFORM")
+        fi
+
+        if [ -n "$INPUT_SET" ]; then
+          IFS=',' read -ra sets <<< "$INPUT_SET"
+          for set_name in "${sets[@]}"; do
+            if [ -n "$set_name" ]; then
+              args+=(--set "$set_name")
+            fi
+          done
+        fi
+
+        plan_file="$(mktemp)"
+        cargo-affect "${args[@]}" > "$plan_file"
+
+        python3 - "$plan_file" "$GITHUB_OUTPUT" "$INPUT_BACKEND" <<'PY'
+        import json
+        import os
+        import sys
+
+        plan_path, output_path, backend = sys.argv[1:4]
+        with open(plan_path, "r", encoding="utf-8") as handle:
+            plan = json.load(handle)
+
+        outputs = {
+            "packages": " ".join(plan["packages"]),
+            "package-args": plan["package_args"],
+            "nextest-expr": plan["nextest_expr"],
+            "empty": "true" if not plan["packages"] else "false",
+            "cache-group": plan["cache_dimensions"]["package_group"],
+            "backend": backend,
+            "runner": f"{os.environ.get('RUNNER_OS', '')}-{os.environ.get('RUNNER_ARCH', '')}".strip("-"),
+        }
+
+        with open(output_path, "a", encoding="utf-8") as output:
+            for key, value in outputs.items():
+                print(f"{key}={value}", file=output)
+            print("json<<__CARGO_AFFECT_JSON__", file=output)
+            print(json.dumps(plan, indent=2), file=output)
+            print("__CARGO_AFFECT_JSON__", file=output)
+        PY
