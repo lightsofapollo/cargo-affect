@@ -38,6 +38,7 @@ Policy and GitHub Action work can happen in parallel after the foundation CLI ex
 - `cargo affect packages --workspace <path> --base <ref>` prints affected package names.
 - `cargo affect package-args` prints `-p <name>` pairs for direct use in Cargo commands.
 - `cargo affect nextest-expr` prints a valid nextest package filter expression.
+- CI examples optimize for `cargo nextest run -E '<expr>'`; plain `cargo test` is treated as a fallback path.
 - `cargo affect explain` shows selected packages and selection reasons.
 - Unknown/global changes can safely select all workspace packages.
 - Unit/integration tests cover changed package detection, reverse dependent traversal, unmapped file handling, and Cargo subcommand invocation.

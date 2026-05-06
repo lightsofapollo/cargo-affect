@@ -52,14 +52,14 @@ Files:
 Add a backend-neutral example first:
 
 - Planner step using `cargo affect plan`.
-- Test step consuming `package-args` or matrix JSON.
+- Test step consuming `nextest-expr` by default, with `package-args` available for non-nextest Cargo commands.
 - Cache key dimensions based on toolchain, OS, target triple, profile, feature mode, workspace root, and package set.
 
 Add a WarpBuild recipe:
 
 - `actions/checkout@v4` with `fetch-depth: 0`.
 - `WarpBuilds/rust-cache@v2` with stable `shared-key`.
-- `cargo nextest run ${{ steps.affect.outputs.package-args }}`.
+- `cargo nextest run -E '${{ steps.affect.outputs.nextest-expr }}'`.
 
 Document future backend slots:
 
@@ -84,7 +84,7 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test
+cargo nextest run
 ```
 
 Manually inspect rendered README and action output contract.

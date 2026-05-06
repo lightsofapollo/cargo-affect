@@ -61,7 +61,7 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test
+cargo nextest run
 cargo run -- packages --changed-file src/main.rs
 cargo run -- affect packages --changed-file src/main.rs
 ```

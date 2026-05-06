@@ -58,7 +58,7 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      package-args: ${{ steps.affect.outputs.package-args }}
+      nextest-expr: ${{ steps.affect.outputs.nextest-expr }}
       empty: ${{ steps.affect.outputs.empty }}
       cache-group: ${{ steps.affect.outputs.cache-group }}
     steps:
@@ -78,7 +78,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test ${{ needs.plan.outputs.package-args }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run -E '${{ needs.plan.outputs.nextest-expr }}'
         working-directory: crates
 ```
 
@@ -104,6 +107,8 @@ The core planner output is the same for all of them.
 ## Install Path
 
 CI should not rebuild `cargo-affect` just to decide what changed. The GitHub Action prefers a prebuilt release binary, then a restored tool cache, and only falls back to a local release build for unreleased SHAs or local development.
+
+The optimized test path is `cargo nextest run -E '<expr>'`. `package-args` exists for plain Cargo commands, but large workspaces should usually consume `nextest-expr`.
 
 For local installation:
 

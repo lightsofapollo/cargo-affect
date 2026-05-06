@@ -57,5 +57,5 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test
+cargo nextest run
 ```
