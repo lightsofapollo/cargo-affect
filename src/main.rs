@@ -162,7 +162,7 @@ fn plan(args: &CommonArgs) -> Result<Plan> {
         .exec()
         .with_context(|| format!("failed to read cargo metadata for {workspace_manifest}"))?;
 
-    let workspace_root = normalize_path(metadata.workspace_root.clone());
+    let workspace_root = canonicalize_dir(&metadata.workspace_root)?;
     let config = load_policy_config(args, &workspace_root)?;
     let packages = workspace_packages(&metadata)?;
     let reverse_deps = reverse_workspace_dependencies(&metadata, &packages);
@@ -235,12 +235,12 @@ fn plan(args: &CommonArgs) -> Result<Plan> {
             for dependent in reverse_deps.get(&package_name).into_iter().flatten() {
                 if selected.insert(dependent.clone()) {
                     queue.push_back(dependent.clone());
-                }
-                if packages_by_name.contains_key(dependent) {
-                    reasons
-                        .entry(dependent.clone())
-                        .or_default()
-                        .push(format!("depends on {package_name}"));
+                    if packages_by_name.contains_key(dependent) {
+                        reasons
+                            .entry(dependent.clone())
+                            .or_default()
+                            .push(format!("depends on {package_name}"));
+                    }
                 }
             }
         }
@@ -334,7 +334,7 @@ fn workspace_packages(metadata: &cargo_metadata::Metadata) -> Result<Vec<Workspa
             Ok(WorkspacePackage {
                 id: package.id.clone(),
                 name: package.name.to_string(),
-                root: normalize_path(root.to_path_buf()),
+                root: canonicalize_dir(root)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -381,6 +381,7 @@ fn changed_files(args: &CommonArgs, workspace_root: &Utf8Path) -> Result<Vec<Utf
     } else {
         args.changed_files.clone()
     };
+    let git_root = git_root(workspace_root).ok();
 
     changed_files
         .into_iter()
@@ -388,10 +389,54 @@ fn changed_files(args: &CommonArgs, workspace_root: &Utf8Path) -> Result<Vec<Utf
             if file.is_absolute() {
                 Ok(normalize_path(file))
             } else {
-                Ok(normalize_path(workspace_root.join(file)))
+                let workspace_relative = canonicalize_existing_path(workspace_root.join(&file));
+                if let Some(git_root) = &git_root {
+                    let repo_relative = canonicalize_existing_path(git_root.join(&file));
+                    if repo_relative.starts_with(workspace_root) {
+                        return Ok(repo_relative);
+                    }
+                }
+                Ok(workspace_relative)
             }
         })
         .collect()
+}
+
+fn git_root(workspace_root: &Utf8Path) -> Result<Utf8PathBuf> {
+    let output = ProcessCommand::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(workspace_root)
+        .output()
+        .with_context(|| format!("failed to find git root for {workspace_root}"))?;
+
+    if !output.status.success() {
+        bail!(
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let root = String::from_utf8(output.stdout)
+        .context("git rev-parse output was not utf-8")?
+        .trim()
+        .to_string();
+    canonicalize_dir(Utf8Path::new(&root))
+}
+
+fn canonicalize_dir(path: &Utf8Path) -> Result<Utf8PathBuf> {
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("failed to canonicalize directory {path}"))?;
+    Utf8PathBuf::from_path_buf(canonical)
+        .map(normalize_path)
+        .map_err(|path| anyhow!("path is not utf-8: {}", path.display()))
+}
+
+fn canonicalize_existing_path(path: Utf8PathBuf) -> Utf8PathBuf {
+    std::fs::canonicalize(&path)
+        .ok()
+        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
+        .map(normalize_path)
+        .unwrap_or_else(|| normalize_path(path))
 }
 
 fn git_changed_files(base: &str, workspace_root: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
@@ -725,6 +770,28 @@ include = ["a"]
     }
 
     #[test]
+    fn repo_relative_paths_work_for_nested_workspace() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo_root = Utf8PathBuf::from_path_buf(repo.path().to_path_buf()).unwrap();
+        run_git(&repo_root, ["init"]);
+
+        let workspace = TestWorkspace::new_at(repo_root.join("crates"));
+        let plan = plan(&CommonArgs {
+            workspace: workspace.root(),
+            base: "origin/main".to_string(),
+            changed_files: vec![Utf8PathBuf::from("crates/a/src/lib.rs")],
+            config: None,
+            package_sets: Vec::new(),
+            platform: None,
+        })
+        .unwrap();
+
+        assert_eq!(plan.changed_files, vec!["a/src/lib.rs"]);
+        assert_eq!(plan.packages, vec!["a", "b"]);
+        assert!(!plan.select_all);
+    }
+
+    #[test]
     fn cargo_subcommand_invocation_is_accepted() {
         let cli = Cli::try_parse_from([
             "cargo-affect",
@@ -756,7 +823,16 @@ include = ["a"]
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+            Self::build(dir, root)
+        }
 
+        fn new_at(root: Utf8PathBuf) -> Self {
+            fs::create_dir_all(&root).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            Self::build(dir, root)
+        }
+
+        fn build(dir: TempDir, root: Utf8PathBuf) -> Self {
             write(
                 root.join("Cargo.toml"),
                 r#"
@@ -817,5 +893,18 @@ edition = "2024"
 
     fn write(path: Utf8PathBuf, contents: impl AsRef<[u8]>) {
         fs::write(path, contents).unwrap();
+    }
+
+    fn run_git<const N: usize>(dir: &Utf8Path, args: [&str; N]) {
+        let output = ProcessCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

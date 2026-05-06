@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: lightsofapollo/cargo-affect@v0.1.0
+      - uses: lightsofapollo/cargo-affect@v0.1.1
         id: affect
         with:
           workspace: crates
