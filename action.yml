@@ -8,6 +8,12 @@ inputs:
   base:
     description: Git base ref to diff against, or auto for pull_request/push detection.
     default: "auto"
+  fetch-base:
+    description: Fetch the resolved diff base when it is missing from a shallow checkout.
+    default: "true"
+  base-fetch-depth:
+    description: Commit depth used when fetching the diff base or deepening the current branch.
+    default: "256"
   config:
     description: Optional affect.toml path.
     default: ""
@@ -91,6 +97,8 @@ runs:
       env:
         INPUT_WORKSPACE: ${{ inputs.workspace }}
         INPUT_BASE: ${{ inputs.base }}
+        INPUT_FETCH_BASE: ${{ inputs.fetch-base }}
+        INPUT_BASE_FETCH_DEPTH: ${{ inputs.base-fetch-depth }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_SET: ${{ inputs.set }}
         INPUT_PLATFORM: ${{ inputs.platform }}
@@ -130,6 +138,78 @@ runs:
         PY
           )"
         fi
+
+        ref_exists() {
+          git rev-parse --verify --quiet "$1^{commit}" >/dev/null 2>&1
+        }
+
+        fetch_branch() {
+          local branch="$1"
+          local destination="$2"
+          git fetch --no-tags --depth="$INPUT_BASE_FETCH_DEPTH" origin \
+            "+refs/heads/${branch}:${destination}"
+        }
+
+        fetch_base_if_needed() {
+          if [ "$INPUT_FETCH_BASE" != "true" ]; then
+            return
+          fi
+
+          if ref_exists "$base"; then
+            return
+          fi
+
+          if ! git remote get-url origin >/dev/null 2>&1; then
+            echo "::warning::Diff base $base is missing, but no origin remote is configured."
+            return
+          fi
+
+          echo "Fetching missing diff base $base"
+
+          case "$base" in
+            origin/*)
+              branch="${base#origin/}"
+              fetch_branch "$branch" "refs/remotes/origin/${branch}" || true
+              ;;
+            refs/remotes/origin/*)
+              branch="${base#refs/remotes/origin/}"
+              fetch_branch "$branch" "$base" || true
+              ;;
+            refs/heads/*)
+              branch="${base#refs/heads/}"
+              fetch_branch "$branch" "refs/remotes/origin/${branch}" || true
+              if ref_exists "origin/$branch"; then
+                base="origin/$branch"
+              fi
+              ;;
+            *)
+              if [[ "$base" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                git fetch --no-tags --depth="$INPUT_BASE_FETCH_DEPTH" origin "$base" || true
+
+                if ! ref_exists "$base"; then
+                  current_branch="${GITHUB_REF_NAME:-}"
+                  if [ -n "$current_branch" ] && [ "${GITHUB_REF_TYPE:-}" = "branch" ]; then
+                    git fetch --no-tags --deepen="$INPUT_BASE_FETCH_DEPTH" origin \
+                      "+refs/heads/${current_branch}:refs/remotes/origin/${current_branch}" || true
+                  fi
+                fi
+              elif git ls-remote --exit-code --heads origin "$base" >/dev/null 2>&1; then
+                fetch_branch "$base" "refs/remotes/origin/${base}" || true
+                if ref_exists "origin/$base"; then
+                  base="origin/$base"
+                fi
+              else
+                git fetch --no-tags --depth="$INPUT_BASE_FETCH_DEPTH" origin "$base" || true
+              fi
+              ;;
+          esac
+
+          if ! ref_exists "$base"; then
+            echo "::warning::Diff base $base is still missing after fetch; cargo-affect will run git diff and report any error."
+          fi
+        }
+
+        fetch_base_if_needed
 
         echo "Using diff base $base"
         args=(plan --workspace "$INPUT_WORKSPACE" --base "$base")

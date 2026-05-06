@@ -34,16 +34,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build release binary
         shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          if [ -n "${{ matrix.target }}" ]; then
-            rustup target add "${{ matrix.target }}"
-            if [[ "${{ matrix.target }}" == *linux-musl ]]; then
+          if [ -n "$BUILD_TARGET" ]; then
+            rustup target add "$BUILD_TARGET"
+            if [[ "$BUILD_TARGET" == *linux-musl ]]; then
               sudo apt-get update
               sudo apt-get install -y musl-tools
             fi
-            cargo build --release --locked --target "${{ matrix.target }}"
-            echo "CARGO_AFFECT_BUILD_DIR=target/${{ matrix.target }}/release" >> "$GITHUB_ENV"
+            cargo build --release --locked --target "$BUILD_TARGET"
+            echo "CARGO_AFFECT_BUILD_DIR=target/$BUILD_TARGET/release" >> "$GITHUB_ENV"
           else
             cargo build --release --locked
             echo "CARGO_AFFECT_BUILD_DIR=target/release" >> "$GITHUB_ENV"
