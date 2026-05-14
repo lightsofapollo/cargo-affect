@@ -347,7 +347,7 @@ fn plan(args: &CommonArgs) -> Result<Plan> {
         }
     }
 
-    selected = apply_package_set_filters(selected, &config, &package_sets)?;
+    selected = apply_package_set_filters(selected, &config, &package_sets, &packages)?;
     selected = apply_platform_excludes(selected, &config, &platform)?;
 
     reasons.retain(|package, _| selected.contains(package));
@@ -771,16 +771,33 @@ fn apply_package_set_filters(
     selected: BTreeSet<String>,
     config: &PolicyConfig,
     package_sets: &[String],
+    workspace_packages: &[WorkspacePackage],
 ) -> Result<BTreeSet<String>> {
     if package_sets.is_empty() {
         return Ok(selected);
     }
 
+    let workspace_package_names = workspace_packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
     let mut include_patterns = Vec::new();
     for set_name in package_sets {
         let Some(set) = config.sets.get(set_name) else {
             bail!("unknown package set {set_name} in --set");
         };
+        let mut matches_workspace = false;
+        for package_name in &workspace_package_names {
+            if matches_glob_patterns(&set.include, package_name)? {
+                matches_workspace = true;
+                break;
+            }
+        }
+        if !matches_workspace {
+            bail!(
+                "package set {set_name} matched no workspace packages; check --workspace or affect.toml"
+            );
+        }
         include_patterns.extend(set.include.iter().cloned());
     }
 
@@ -1113,6 +1130,43 @@ include = ["a"]
 
         assert_eq!(plan.packages, vec!["a"]);
         assert_eq!(plan.cache_dimensions.package_group, "a");
+    }
+
+    #[test]
+    fn package_set_that_matches_no_workspace_packages_errors() {
+        let workspace = TestWorkspace::new();
+        workspace.write_config(
+            r#"
+[sets.virgil]
+include = ["virgil-*"]
+"#,
+        );
+        let mut args = args(&workspace, ["a/src/lib.rs"]);
+        args.package_sets = vec!["virgil".to_string()];
+
+        let error = plan(&args).unwrap_err().to_string();
+
+        assert!(error.contains("package set virgil matched no workspace packages"));
+    }
+
+    #[test]
+    fn ci_profile_set_that_matches_no_workspace_packages_errors() {
+        let workspace = TestWorkspace::new();
+        workspace.write_config(
+            r#"
+[sets.virgil]
+include = ["virgil-*"]
+
+[ci.profiles.virgil]
+set = "virgil"
+"#,
+        );
+        let mut args = args(&workspace, ["a/src/lib.rs"]);
+        args.profile = Some("virgil".to_string());
+
+        let error = plan(&args).unwrap_err().to_string();
+
+        assert!(error.contains("package set virgil matched no workspace packages"));
     }
 
     #[test]
