@@ -292,8 +292,16 @@ fn plan(args: &CommonArgs) -> Result<Plan> {
 
         if let Some(mapped_packages) = mapped_policy_packages(&config, &changed_relative)? {
             for package_name in mapped_packages {
+                // A shared affect.toml may map a path to packages that live in
+                // a different workspace than the one being planned (e.g. a
+                // generated schema mapped to gpu-cli while planning the virgil
+                // workspace). Such a package is not a member of this workspace,
+                // so the path change affects nothing here — skip it rather than
+                // failing the whole plan. A single-workspace run cannot
+                // distinguish "member of another workspace" from "typo", so
+                // bailing would break legitimate cross-workspace mappings.
                 if !packages_by_name.contains_key(package_name.as_str()) {
-                    bail!("affect.toml maps {changed_relative} to unknown package {package_name}");
+                    continue;
                 }
                 if selected.insert(package_name.clone()) {
                     queue.push_back(package_name.clone());
@@ -1093,6 +1101,28 @@ global = ["schema/**"]
         assert!(plan.packages.is_empty());
         assert_eq!(plan.package_args, "");
         assert_eq!(plan.nextest_expr, "");
+        assert!(!plan.select_all);
+    }
+
+    #[test]
+    fn path_mapping_skips_packages_outside_workspace() {
+        // A shared affect.toml can map a path to a package that lives in a
+        // different workspace than the one being planned (e.g. a generated
+        // schema mapped to a gpu crate while planning the virgil workspace).
+        // That package is not a member here, so the path change selects
+        // nothing — and crucially must NOT error the plan.
+        let workspace = TestWorkspace::new();
+        workspace.write_config(
+            r#"
+[paths]
+"schema/**" = ["package-from-another-workspace"]
+"#,
+        );
+
+        let plan = plan(&args(&workspace, ["schema/gpu.json"])).unwrap();
+
+        assert!(plan.packages.is_empty());
+        assert_eq!(plan.package_args, "");
         assert!(!plan.select_all);
     }
 
